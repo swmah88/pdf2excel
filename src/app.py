@@ -39,21 +39,29 @@ def find_and_parse_headers(lines):
 def parse_financial_data(text):
     if not text: return pd.DataFrame()
     lines = text.strip().split('\n')
-    headers, header_line_index = find_and_parse_headers(lines)
-    if not headers: return pd.DataFrame()
-    num_header_cols = len(headers)
-    data = []
+    all_rows = []
     number_regex = re.compile(r'\(?[\$€]?[\d,]+\.?\d*\)?')
-    for i, line in enumerate(lines):
-        if i <= header_line_index: continue
+    for line in lines:
         matches = list(number_regex.finditer(line))
-        if len(matches) == num_header_cols:
-            desc = line[:matches[0].start()].strip().replace('$', '').replace('€', '').strip()
-            if not desc or "using the equity method" in desc.lower(): continue
+        if len(matches) > 0: # Be lenient
+            desc = line[:matches[0].start()].strip()
+            if not desc or "page" in desc.lower() or "unaudited" in desc.lower(): continue
             nums = [s.replace('$', '').replace('€', '').replace(',', '').replace('(', '-').replace(')', '') for s in [m.group(0) for m in matches]]
-            data.append([desc] + nums)
-    if not data: return pd.DataFrame()
-    return pd.DataFrame(data, columns=['Description'] + headers)
+            all_rows.append([desc] + nums)
+    if not all_rows: return pd.DataFrame()
+
+    max_cols = max(len(r) for r in all_rows)
+    for row in all_rows:
+        while len(row) < max_cols:
+            row.append(None)
+
+    headers, _ = find_and_parse_headers(lines)
+    num_data_cols = max_cols - 1
+    if len(headers) == num_data_cols:
+        columns = ['Description'] + headers
+    else:
+        columns = ['Description'] + [f'Value {i+1}' for i in range(num_data_cols)]
+    return pd.DataFrame(all_rows, columns=columns)
 
 def extract_text_from_image(filepath):
     try: return pytesseract.image_to_string(Image.open(filepath))
@@ -74,8 +82,15 @@ def combine_and_sort(list_of_dfs):
     sorted_df = pd.DataFrame()
     if sortable:
         long_dfs = [df.melt(id_vars=['Description'], var_name='Period', value_name='Value') for df in sortable]
-        combined = pd.concat(long_dfs, ignore_index=True).dropna(subset=['Value']).drop_duplicates(subset=['Description', 'Period'], keep='first')
+        combined = pd.concat(long_dfs, ignore_index=True).dropna(subset=['Value'])
+
+        # Preserve original order of descriptions
+        description_order = combined['Description'].unique()
+        combined['Description'] = pd.Categorical(combined['Description'], categories=description_order, ordered=True)
+
+        combined.drop_duplicates(subset=['Description', 'Period'], keep='first', inplace=True)
         sorted_df = combined.pivot(index='Description', columns='Period', values='Value')
+
     unsorted_df = pd.concat(unsortable, ignore_index=True) if unsortable else pd.DataFrame()
     return sorted_df, unsorted_df
 
