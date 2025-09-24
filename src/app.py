@@ -6,23 +6,18 @@ import pytesseract
 import re
 import sys
 from collections import Counter
+import fitz  # PyMuPDF
 
 # --- Core Data Extraction Logic ---
 
 def find_and_parse_headers(lines):
-    """
-    Finds the header line, parses it, and returns a list of pandas Period objects.
-    """
-    header_line = ""
+    header_line, header_line_index = "", -1
     header_line_regex = re.compile(r'((?:Q|H)\d|Total)\s?\.?\d{4}|\b\d{4}\b')
-    for line in lines:
+    for i, line in enumerate(lines):
         if len(header_line_regex.findall(line)) >= 2:
-            header_line = line
+            header_line, header_line_index = line, i
             break
-
-    if not header_line:
-        return []
-
+    if not header_line: return [], -1
     header_line = header_line.replace('#', 'H')
     parsed_headers = []
     period_regex = re.compile(r'(Q\d)\s?\.?(\d{4})|(H\d)\s?\.?(\d{4})|(\b\d{4}\b)')
@@ -34,57 +29,41 @@ def find_and_parse_headers(lines):
             quarter = 'Q2' if match.group(3) == 'H1' else 'Q4'
             period_str, freq = f"{match.group(4)}{quarter}", 'Q'
         elif match.group(5):
-            period_str, freq = match.group(5), 'Y-DEC'
+            period_str, freq = f"{match.group(5)}Q4", 'Q'
         if period_str:
             try:
                 parsed_headers.append(pd.Period(period_str, freq=freq))
-            except ValueError:
-                pass
-    return parsed_headers
+            except ValueError: pass
+    return parsed_headers, header_line_index
 
 def parse_financial_data(text):
     if not text: return pd.DataFrame()
     lines = text.strip().split('\n')
-    all_rows = []
-    number_regex = re.compile(r'\(?[\$€]?[\d,]+\.?\d*\)?')
-    for line in lines:
-        matches = list(number_regex.finditer(line))
-        if len(matches) > 1:
-            desc = line[:matches[0].start()].strip()
-            if not desc or desc.lower() in ["basic", "diluted", "of which:"]: continue
-            nums = [m.group(0) for m in matches]
-            all_rows.append({'desc': desc, 'nums': nums, 'num_cols': len(nums)})
-    if not all_rows: return pd.DataFrame()
-    col_counts = Counter(row['num_cols'] for row in all_rows)
-    if not col_counts: return pd.DataFrame()
-    mode_cols = col_counts.most_common(1)[0][0]
+    headers, header_line_index = find_and_parse_headers(lines)
+    if not headers: return pd.DataFrame()
+    num_header_cols = len(headers)
     data = []
-    for row in all_rows:
-        if row['num_cols'] == mode_cols:
-            cleaned_nums = [s.replace('$', '').replace('€', '').replace(',', '').replace('(', '-').replace(')', '') for s in row['nums']]
-            data.append([row['desc']] + cleaned_nums)
+    number_regex = re.compile(r'\(?[\$€]?[\d,]+\.?\d*\)?')
+    for i, line in enumerate(lines):
+        if i <= header_line_index: continue
+        matches = list(number_regex.finditer(line))
+        if len(matches) == num_header_cols:
+            desc = line[:matches[0].start()].strip().replace('$', '').replace('€', '').strip()
+            if not desc or "using the equity method" in desc.lower(): continue
+            nums = [s.replace('$', '').replace('€', '').replace(',', '').replace('(', '-').replace(')', '') for s in [m.group(0) for m in matches]]
+            data.append([desc] + nums)
     if not data: return pd.DataFrame()
-    headers = find_and_parse_headers(lines)
-    if len(headers) == mode_cols:
-        columns = ['Description'] + headers
-    else:
-        if headers: print(f"Warning: Found {len(headers)} headers but data has {mode_cols} columns. Using generic headers.")
-        columns = ['Description'] + [f'Value {i+1}' for i in range(mode_cols)]
-    return pd.DataFrame(data, columns=columns)
+    return pd.DataFrame(data, columns=['Description'] + headers)
 
 def extract_text_from_image(filepath):
-    try:
-        return pytesseract.image_to_string(Image.open(filepath))
-    except Exception as e:
-        return f"Error extracting text from image: {e}"
+    try: return pytesseract.image_to_string(Image.open(filepath))
+    except Exception as e: return f"Error: {e}"
 
 def extract_text_from_pdf(filepath):
     try:
         doc = fitz.open(filepath)
-        text = "".join(page.get_text() for page in doc)
-        return text
-    except Exception as e:
-        return f"Error extracting text from PDF: {e}"
+        return "".join(page.get_text() for page in doc)
+    except Exception as e: return f"Error: {e}"
 
 # --- GUI and App Logic ---
 sorted_df_global, unsorted_df_global = pd.DataFrame(), pd.DataFrame()
@@ -110,15 +89,13 @@ def load_and_process_files(text_widget, save_button):
     for fp in filepaths:
         text_widget.insert(tk.END, f"--- Processing: {fp} ---\n")
         raw_text = extract_text_from_pdf(fp) if fp.lower().endswith('.pdf') else extract_text_from_image(fp)
-        if "Error" in raw_text:
-            text_widget.insert(tk.END, f"Error: {raw_text}\n\n")
+        if "Error" in raw_text: text_widget.insert(tk.END, f"Error: {raw_text}\n\n")
         else:
             df = parse_financial_data(raw_text)
             if not df.empty:
                 all_dfs.append(df)
                 text_widget.insert(tk.END, "Successfully parsed.\n\n")
-            else:
-                text_widget.insert(tk.END, "Could not parse data.\n\n")
+            else: text_widget.insert(tk.END, "Could not parse data.\n\n")
     if all_dfs:
         sorted_df_global, unsorted_df_global = combine_and_sort(all_dfs)
         if not sorted_df_global.empty:
@@ -140,8 +117,7 @@ def save_to_excel():
             if not sorted_df_global.empty: sorted_df_global.to_excel(writer, sheet_name='Chronologically Sorted Data')
             if not unsorted_df_global.empty: unsorted_df_global.to_excel(writer, sheet_name='Unsortable Data')
         messagebox.showinfo("Success", f"Data saved to {filepath}")
-    except Exception as e:
-        messagebox.showerror("Error", f"Could not save file: {e}")
+    except Exception as e: messagebox.showerror("Error", f"Could not save file: {e}")
 
 def create_gui():
     window = tk.Tk()
