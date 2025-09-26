@@ -10,6 +10,15 @@ import fitz  # PyMuPDF
 
 # --- Core Data Extraction Logic ---
 
+def normalize_description(desc):
+    """Cleans up a line item description for consistency."""
+    desc = desc.lower()
+    # Remove all characters that are not letters, numbers, spaces, or parentheses
+    desc = re.sub(r'[^\w\s\(\)]', '', desc)
+    # Replace multiple spaces with a single space
+    desc = " ".join(desc.split())
+    return desc
+
 def find_and_parse_headers(lines):
     header_line, header_line_index = "", -1
     header_line_regex = re.compile(r'((?:Q|H)\d|Total)\s?\.?\d{4}|\b\d{4}\b')
@@ -43,8 +52,10 @@ def parse_financial_data(text):
     number_regex = re.compile(r'\(?[\$€]?[\d,]+\.?\d*\)?')
     for line in lines:
         matches = list(number_regex.finditer(line))
-        if len(matches) > 0: # Be lenient
+        if len(matches) > 0:
             desc = line[:matches[0].start()].strip()
+            # Normalize the description for consistency
+            desc = normalize_description(desc)
             if not desc or "page" in desc.lower() or "unaudited" in desc.lower(): continue
             nums = [s.replace('$', '').replace('€', '').replace(',', '').replace('(', '-').replace(')', '') for s in [m.group(0) for m in matches]]
             all_rows.append([desc] + nums)
@@ -84,7 +95,6 @@ def combine_and_sort(list_of_dfs):
         long_dfs = [df.melt(id_vars=['Description'], var_name='Period', value_name='Value') for df in sortable]
         combined = pd.concat(long_dfs, ignore_index=True).dropna(subset=['Value'])
 
-        # Preserve original order of descriptions
         description_order = combined['Description'].unique()
         combined['Description'] = pd.Categorical(combined['Description'], categories=description_order, ordered=True)
 
